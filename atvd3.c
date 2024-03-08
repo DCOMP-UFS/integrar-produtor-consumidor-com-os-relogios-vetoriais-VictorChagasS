@@ -8,6 +8,7 @@
 #include <mpi.h>     
 
 #define THREAD_NUM 3
+#define CLOCK_QUEUE_SIZE 10
 
 typedef struct {
     int p[3];
@@ -19,13 +20,13 @@ pthread_cond_t saidaCondEmpty;
 pthread_cond_t saidaCondFull;
 
 int saidaClockCount = 0;
-Clock saidaClockQueue[3];
+Clock saidaClockQueue[CLOCK_QUEUE_SIZE];
 
 pthread_mutex_t entradaMutex;
 pthread_cond_t entradaCondEmpty;
 pthread_cond_t entradaCondFull;
 int entradaClockCount = 0;
-Clock entradaClockQueue[3];
+Clock entradaClockQueue[CLOCK_QUEUE_SIZE];
 
 void Event(int pid, Clock *clock) {
     clock->p[pid]++;
@@ -58,7 +59,7 @@ Clock GetClock(pthread_mutex_t *mutex, pthread_cond_t *condEmpty, pthread_cond_t
 void PutClock(pthread_mutex_t *mutex, pthread_cond_t *condEmpty, pthread_cond_t *condFull, int *clockCount, Clock clock, Clock *clockQueue) {
     pthread_mutex_lock(mutex);
 
-    while (*clockCount == 3) {
+    while (*clockCount == CLOCK_QUEUE_SIZE) {
         pthread_cond_wait(condFull, mutex);
     }
     
@@ -191,12 +192,12 @@ void *ReceiveThread(void *args) {
 
 // Representa o processo de rank 0
 void process0(){
-   pthread_t thread[3];
+   pthread_t thread[THREAD_NUM];
    pthread_create(&thread[0], NULL, &MainThread, (void*) 0);
    pthread_create(&thread[1], NULL, &SendThread, (void*) 0);
    pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 0);
 
-   for (int i = 0; i < 3; i++){  
+   for (int i = 0; i < THREAD_NUM; i++){  
       if (pthread_join(thread[i], NULL) != 0) {
          perror("Falha ao juntar a thread");
       }
@@ -205,7 +206,7 @@ void process0(){
 
 // Representa o processo de rank 1
 void process1(){
-   pthread_t thread[3];
+   pthread_t thread[THREAD_NUM];
    pthread_create(&thread[0], NULL, &MainThread, (void*) 1);
    pthread_create(&thread[1], NULL, &SendThread, (void*) 1);
    pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 1);
@@ -219,12 +220,12 @@ void process1(){
 
 // Representa o processo de rank 2
 void process2(){
-   pthread_t thread[3];
+   pthread_t thread[THREAD_NUM];
    pthread_create(&thread[0], NULL, &MainThread, (void*) 2);
    pthread_create(&thread[1], NULL, &SendThread, (void*) 2);
    pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 2);
    
-   for (int i = 0; i < 3; i++){  
+   for (int i = 0; i < THREAD_NUM; i++){  
       if (pthread_join(thread[i], NULL) != 0) {
          perror("Falha ao juntar a thread");
       }
