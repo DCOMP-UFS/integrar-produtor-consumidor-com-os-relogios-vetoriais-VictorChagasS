@@ -1,158 +1,269 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <mpi.h>
-#include <pthread.h>
+#include <string.h>
+#include <pthread.h> 
 #include <unistd.h>
+#include <semaphore.h>
+#include <time.h>
+#include <mpi.h>     
 
-#define QUEUE_SIZE 10
-
-// mpicc -o atvd3 atvd3.c -lpthread
-// mpiexec -n 3 ./at3
+#define THREAD_NUM 3
 
 typedef struct {
     int p[3];
-    int idProcesso;
+    int idProcess;
 } Clock;
 
-typedef struct _Fila {
-    Clock queue[QUEUE_SIZE];
-    int start, end;
-    pthread_mutex_t mutex;
-    pthread_cond_t is_full, is_empty;
-} Fila;
+pthread_mutex_t saidaMutex;
+pthread_cond_t saidaCondEmpty;
+pthread_cond_t saidaCondFull;
 
-Fila receiveFila, sendFila;
-Clock global_clock = {{0, 0, 0}, 0};
+int saidaClockCount = 0;
+Clock saidaClockQueue[3];
 
-Fila create_fila() {
-    Fila q;
-    q.start = 0;
-    q.end = 0;
-    pthread_mutex_init(&q.mutex, NULL);
-    pthread_cond_init(&q.is_full, NULL);
-    pthread_cond_init(&q.is_empty, NULL);
-    return q;
+pthread_mutex_t entradaMutex;
+pthread_cond_t entradaCondEmpty;
+pthread_cond_t entradaCondFull;
+int entradaClockCount = 0;
+Clock entradaClockQueue[3];
+
+void Event(int pid, Clock *clock) {
+    clock->p[pid]++;
+    printf("Processo: %d, Relógio: (%d, %d, %d)\n", pid, clock->p[0], clock->p[1], clock->p[2]);
 }
 
-int add_to_fila(Fila *q, Clock c) {
-    pthread_mutex_lock(&q->mutex);
-    while ((q->end + 1) % QUEUE_SIZE == q->start % QUEUE_SIZE) {
-        pthread_cond_wait(&q->is_full, &q->mutex);
+Clock GetClock(pthread_mutex_t *mutex, pthread_cond_t *condEmpty, pthread_cond_t *condFull, int *clockCount, Clock *clockQueue) {
+    Clock clock;
+    pthread_mutex_lock(mutex);
+    
+    while (*clockCount == 0) {
+        pthread_cond_wait(condEmpty, mutex);
     }
-    q->queue[q->end % QUEUE_SIZE] = c;
-    q->end++;
-    pthread_cond_signal(&q->is_empty);
-    pthread_mutex_unlock(&q->mutex);
-    return 0;
-}
 
-Clock remove_from_fila(Fila *q) {
-    pthread_mutex_lock(&q->mutex);
-    while (q->start == q->end) {
-        pthread_cond_wait(&q->is_empty, &q->mutex);
+    clock = clockQueue[0];
+
+    for (int i = 0; i < *clockCount - 1; i++) {
+        clockQueue[i] = clockQueue[i + 1];
     }
-    Clock c = q->queue[q->start % QUEUE_SIZE];
-    q->start++;
-    pthread_cond_signal(&q->is_full);
-    pthread_mutex_unlock(&q->mutex);
-    return c;
+
+    (*clockCount)--;
+    
+    pthread_mutex_unlock(mutex);
+
+    pthread_cond_signal(condFull);
+    
+    return clock;
 }
 
-void* receive_thread(void* arg) {
-    Clock c;
-    while (1) {
-        MPI_Recv(&c, sizeof(Clock) / sizeof(int), MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        add_to_fila(&receiveFila, c);
+void PutClock(pthread_mutex_t *mutex, pthread_cond_t *condEmpty, pthread_cond_t *condFull, int *clockCount, Clock clock, Clock *clockQueue) {
+    pthread_mutex_lock(mutex);
+
+    while (*clockCount == 3) {
+        pthread_cond_wait(condFull, mutex);
     }
-    return NULL;
+    
+    Clock temp = clock;
+
+    clockQueue[*clockCount] = temp;
+    (*clockCount)++;
+    
+
+    pthread_mutex_unlock(mutex);
+    pthread_cond_signal(condEmpty);
 }
 
-void* send_thread(void* arg) {
-    Clock c;
-    while (1) {
-        c = remove_from_fila(&sendFila);
-        int target = c.idProcesso;
-        global_clock.idProcesso = c.idProcesso;
-        MPI_Send(&c, sizeof(Clock) / sizeof(int), MPI_INT, target, 0, MPI_COMM_WORLD);
-        printf("Processo: %d, Clock: (%d, %d, %d)\n", global_clock.idProcesso, global_clock.p[0], global_clock.p[1], global_clock.p[2]);
-    }
-    return NULL;
+void SendControl(int id, Clock *clock) {
+    Event(id, clock);
+    PutClock(&saidaMutex, &saidaCondEmpty, &saidaCondFull, &saidaClockCount, *clock, saidaClockQueue);
 }
 
-void Event(int rank) {
-    global_clock.p[rank]++;
-    printf("Processo: %d, Clock: (%d, %d, %d)\n", global_clock.idProcesso, global_clock.p[0], global_clock.p[1], global_clock.p[2]);
-}
-
-void Send(int rank, int target) {
-    global_clock.p[rank]++;
-    Clock c = global_clock;
-    c.idProcesso = target;
-    add_to_fila(&sendFila, c);
-}
-
-void Receive(int rank) {
-    Clock c = remove_from_fila(&receiveFila);
-    global_clock.p[rank]++;
+Clock* ReceiveControl(int id, Clock *clock) {
+    Clock* temp = clock;
+    Clock clock2 = GetClock(&entradaMutex, &entradaCondEmpty, &entradaCondFull, &entradaClockCount, entradaClockQueue);
     for (int i = 0; i < 3; i++) {
-        if (global_clock.p[i] < c.p[i])  global_clock.p[i] = c.p[i];
+        if (temp->p[i] < clock2.p[i]) {
+            temp->p[i] = clock2.p[i];
+        }
     }
-    printf("Processo: %d, Clock: (%d, %d, %d)\n", global_clock.idProcesso, global_clock.p[0], global_clock.p[1], global_clock.p[2]);
+    temp->p[id]++;
+    printf("Processo: %d, Relógio: (%d, %d, %d)\n", id, clock->p[0], clock->p[1], clock->p[2]);
+    return temp;
 }
 
-void processo0() {
-    Event(0);
-    Send(0, 1);
-    Receive(0);
-    Send(0, 2);
-    Receive(0);
-    Send(0, 1);
-    Event(0);
+void Send(int pid, Clock *clock){
+    int mensagem[3];
+    mensagem[0] = clock->p[0];
+    mensagem[1] = clock->p[1];
+    mensagem[2] = clock->p[2];
+    //MPI SEND
+    MPI_Send(&mensagem, 3, MPI_INT, clock->idProcess, 0, MPI_COMM_WORLD);
 }
 
-void processo1() {
-    Send(1, 0);
-    Receive(1);
-    Receive(1);
+void Receive(int pid, Clock *clock){
+    int mensagem[3];
+    //MPI RECV
+    MPI_Recv(&mensagem, 3, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    clock->p[0] = mensagem[0];
+    clock->p[1] = mensagem[1];
+    clock->p[2] = mensagem[2];
 }
 
-void processo2() {
-    Event(2);
-    Send(2, 0);
-    Receive(2);
-}
+void *MainThread(void *args) {
+    long id = (long) args;
+    int pid = (int) id;
+    Clock* clock = malloc(sizeof(Clock));
+    
+    // Inicializando os campos da estrutura Clock
+    clock->p[0] = 0;
+    clock->p[1] = 0;
+    clock->p[2] = 0;
+    clock->idProcess = 0;
+        
+    if (pid == 0) {
+        
+        Event(pid, clock);
+        
+      
+        clock->idProcess = 1;
+        SendControl(pid, clock);
+       
+        clock = ReceiveControl(pid, clock);
+        
+      
+        clock->idProcess = 2;
+        SendControl(pid, clock);
+       
+        clock = ReceiveControl(pid, clock);
+        
+        
+        clock->idProcess = 1;
+        SendControl(pid, clock);
+    
+       
+        Event(pid, clock);
+    } else if (pid == 1) {
+        
+        clock->idProcess = 0;
+        SendControl(pid, clock);
+        
+     
+        clock = ReceiveControl(pid, clock);
+        
 
-int main(int argc, char **argv) {
-    int my_rank;
-    MPI_Init(NULL, NULL);
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-    global_clock.idProcesso = my_rank;
-
-    receiveFila = create_fila();
-    sendFila = create_fila();
-
-    pthread_t threadRecv, threadSend;
-    pthread_create(&threadRecv, NULL, receive_thread, NULL);
-    pthread_create(&threadSend, NULL, send_thread, NULL);
-
-    switch (my_rank) {
-        case 0:
-            processo0();
-            break;
-        case 1:
-            processo1();
-            break;
-        case 2:
-            processo2();
-            break;
-        default:
-            printf("Rank inválido %d", my_rank);
-            exit(1);
+        clock = ReceiveControl(pid, clock);
+    } else if (pid == 2) {
+    
+        Event(pid, clock);
+        
+    
+        clock->idProcess = 0;
+        SendControl(pid, clock);
+     
+        clock = ReceiveControl(pid, clock);
     }
 
-    pthread_join(threadRecv, NULL);
-    pthread_join(threadSend, NULL);
-
-    MPI_Finalize();
-    return 0;
+    return NULL;
 }
+
+void *SendThread(void *args) {
+    long pid = (long) args;
+    Clock clock;
+    
+    while(1){
+      clock = GetClock(&saidaMutex, &saidaCondEmpty, &saidaCondFull, &saidaClockCount, saidaClockQueue);
+      Send(pid, &clock);
+    }
+
+    return NULL;
+}
+
+void *ReceiveThread(void *args) {
+    long pid = (long) args;
+    Clock clock;
+
+    while(1){
+      Receive(pid, &clock);
+      PutClock(&entradaMutex, &entradaCondEmpty, &entradaCondFull, &entradaClockCount, clock, entradaClockQueue);
+    }
+ 
+    return NULL;
+}
+
+// Representa o processo de rank 0
+void process0(){
+   pthread_t thread[3];
+   pthread_create(&thread[0], NULL, &MainThread, (void*) 0);
+   pthread_create(&thread[1], NULL, &SendThread, (void*) 0);
+   pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 0);
+
+   for (int i = 0; i < 3; i++){  
+      if (pthread_join(thread[i], NULL) != 0) {
+         perror("Falha ao juntar a thread");
+      }
+   }
+}
+
+// Representa o processo de rank 1
+void process1(){
+   pthread_t thread[3];
+   pthread_create(&thread[0], NULL, &MainThread, (void*) 1);
+   pthread_create(&thread[1], NULL, &SendThread, (void*) 1);
+   pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 1);
+   
+   for (int i = 0; i < THREAD_NUM; i++){  
+      if (pthread_join(thread[i], NULL) != 0) {
+         perror("Falha ao juntar a thread");
+      }
+   }
+}
+
+// Representa o processo de rank 2
+void process2(){
+   pthread_t thread[3];
+   pthread_create(&thread[0], NULL, &MainThread, (void*) 2);
+   pthread_create(&thread[1], NULL, &SendThread, (void*) 2);
+   pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 2);
+   
+   for (int i = 0; i < 3; i++){  
+      if (pthread_join(thread[i], NULL) != 0) {
+         perror("Falha ao juntar a thread");
+      }
+   }
+}
+
+int main(int argc, char* argv[]) {
+   int my_rank;
+   
+   pthread_mutex_init(&entradaMutex, NULL);
+   pthread_mutex_init(&saidaMutex, NULL);
+   pthread_cond_init(&entradaCondEmpty, NULL);
+   pthread_cond_init(&saidaCondEmpty, NULL);
+   pthread_cond_init(&entradaCondFull, NULL);
+   pthread_cond_init(&saidaCondFull, NULL);
+  
+   
+   MPI_Init(NULL, NULL); 
+   MPI_Comm_rank(MPI_COMM_WORLD, &my_rank); 
+
+   if (my_rank == 0) { 
+      process0();
+   } else if (my_rank == 1) {  
+      process1();
+   } else if (my_rank == 2) {  
+      process2();
+   }
+
+   /* Finaliza MPI */
+   
+   
+   pthread_mutex_destroy(&entradaMutex);
+   pthread_mutex_destroy(&saidaMutex);
+   pthread_cond_destroy(&entradaCondEmpty);
+   pthread_cond_destroy(&saidaCondEmpty);
+   pthread_cond_destroy(&entradaCondFull);
+   pthread_cond_destroy(&saidaCondFull);
+   
+   MPI_Finalize();
+
+   return 0;
+} 
